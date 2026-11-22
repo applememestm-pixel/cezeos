@@ -30,7 +30,7 @@ function start(image) {
 
 const lockFile=openSync(lock,'wx',0o600);
 try {
-  const image=composeRun(['config','--images']).split(/\r?\n/)[0];
+  const image=composeRun(['config','--images','region']).split(/\r?\n/)[0];
   if(!image || image==='cezeos-region:dev' || !image.split('/')[0].includes('.')) {
     throw new Error('Укажите образ релиза из доверенного реестра в CEZEOS_IMAGE.');
   }

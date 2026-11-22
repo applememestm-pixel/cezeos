@@ -33,5 +33,23 @@ services:
       timeout: 4s
       retries: 5
       start_period: 5s
+  https:
+    image: caddy:2-alpine
+    profiles: [https]
+    restart: unless-stopped
+    depends_on:
+      region:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CEZEOS_UPSTREAM: region:4173
+    volumes:
+      - ./deploy/Caddyfile.cezeos:/etc/caddy/Caddyfile:ro
+      - https-data:/data
+      - https-config:/config
 volumes:
   region-data:
+  https-data:
+  https-config:

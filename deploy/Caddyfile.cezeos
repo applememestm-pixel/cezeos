@@ -1,0 +1,8 @@
+cezeos.pw {
+    encode zstd gzip
+    reverse_proxy {$CEZEOS_UPSTREAM:127.0.0.1:4173}
+}
+
+www.cezeos.pw {
+    redir https://cezeos.pw{uri} 308
+}

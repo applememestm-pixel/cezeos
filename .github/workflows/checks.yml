@@ -16,3 +16,4 @@ jobs:
           node-version: '24'
       - run: node --test
       - run: docker compose config --quiet
+      - run: docker compose --env-file deploy/cezeos.pw.env.example config --quiet
