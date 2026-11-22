@@ -1,0 +1,10 @@
+{
+  "name": "cezeos",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "repository": {"type":"git","url":"https://github.com/applememestm-pixel/cezeos.git"},
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node server.mjs", "test": "node --test" }
+}

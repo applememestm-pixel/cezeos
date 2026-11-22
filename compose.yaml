@@ -1,0 +1,37 @@
+services:
+  region:
+    image: ${CEZEOS_IMAGE:-cezeos-region:dev}
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${CEZEOS_PUBLISH_IP:-127.0.0.1}:${CEZEOS_HOST_PORT:-4173}:4173"
+    environment:
+      CEZEOS_REGION_NAME: ${CEZEOS_REGION_NAME:-CeZeOs}
+      CEZEOS_PUBLIC_ORIGIN: ${CEZEOS_PUBLIC_ORIGIN:-}
+      CEZEOS_GOVERNANCE_HOME: ${CEZEOS_GOVERNANCE_HOME:-0}
+      CEZEOS_GOVERNANCE_REGION_ID: ${CEZEOS_GOVERNANCE_REGION_ID:-}
+      CEZEOS_PEERS: ${CEZEOS_PEERS:-[]}
+      CEZEOS_ALLOW_DEMO: ${CEZEOS_ALLOW_DEMO:-0}
+      CEZEOS_TELEGRAM_CLIENT_ID: ${CEZEOS_TELEGRAM_CLIENT_ID:-}
+      CEZEOS_TELEGRAM_CLIENT_SECRET: ${CEZEOS_TELEGRAM_CLIENT_SECRET:-}
+      CEZEOS_ANDROID_SHA256: ${CEZEOS_ANDROID_SHA256:-}
+      CEZEOS_AQUAMARINE_ISSUER: ${CEZEOS_AQUAMARINE_ISSUER:-}
+      CEZEOS_AQUAMARINE_PUBLIC_KEY: ${CEZEOS_AQUAMARINE_PUBLIC_KEY:-}
+    volumes:
+      - region-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD","node","-e","fetch('http://127.0.0.1:4173/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 5s
+volumes:
+  region-data:

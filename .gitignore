@@ -1,0 +1,15 @@
+/data/
+/node_modules/
+/.env
+/.cezeos-update-*.lock
+/data-test-*/
+/mobile/android/.gradle/
+/mobile/android/app/build/
+/mobile/android/local.properties
+*.jks
+*.keystore
+*.sqlite
+*.sqlite-*
+*.pem
+/.env.*
+!/.env.example

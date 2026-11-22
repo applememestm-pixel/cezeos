@@ -1,0 +1,37 @@
+plugins { id 'com.android.application' version '8.13.2' }
+
+def property = providers.gradleProperty('cezeosOrigin').orElse(providers.environmentVariable('CEZEOS_APP_ORIGIN'))
+if (!property.present) throw new GradleException('Set CEZEOS_APP_ORIGIN to the HTTPS Region address.')
+def site = new URI(property.get())
+if (site.scheme != 'https' || !site.host || site.userInfo || site.query || site.fragment || !(site.path in ['', '/']))
+    throw new GradleException('Set an HTTPS origin with no path.')
+def origin = 'https://' + site.authority
+
+android {
+    namespace 'org.cezeos.app'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'org.cezeos.app'
+        minSdk 23
+        targetSdk 36
+        versionCode 2
+        versionName '0.2.0'
+        manifestPlaceholders = [cezeosUrl: origin + '/', cezeosHost: site.host]
+        def statements = groovy.json.JsonOutput.toJson([[relation:['delegate_permission/common.handle_all_urls'], target:[namespace:'web',site:origin]]])
+    resValue 'string', 'asset_statements', statements.replace('"', '\\"')
+    }
+
+    sourceSets.main.res.srcDir layout.buildDirectory.dir('generated/cezeosIcons')
+}
+
+def appIcon = tasks.register('copyCeZeOsIcon', Copy) {
+    from '../../../public/assets/icon-192.png'
+    into layout.buildDirectory.dir('generated/cezeosIcons/mipmap-xxxhdpi')
+    rename 'icon-192.png', 'ic_launcher.png'
+}
+tasks.named('preBuild').configure { dependsOn appIcon }
+
+dependencies {
+    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.7.4'
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for CeZeOs Region releases
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!package.json
+!server.mjs
+!store.mjs
+!telegram.mjs
+!region.mjs
+!governance.mjs
+!ecosystem.mjs
+!operator.mjs
+!public/
+!public/**

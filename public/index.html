@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0c0f0d">
+  <meta name="description" content="CeZeOs — независимая социальная сеть для творчества.">
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <title>CeZeOs — творческая сеть</title>
+  <script type="module" src="/app.js"></script>
+</head>
+<body class="booting">
+  <a class="skip" href="#main" id="skip">К содержанию</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="/"><img src="/assets/icon.svg" alt="" width="34" height="34"><span>CeZeOs</span></a>
+      <form id="search" class="search" role="search">
+        <span data-icon="search" aria-hidden="true"></span>
+        <input aria-label="Поиск по CeZeOs" name="query" placeholder="Поиск" maxlength="100" required>
+      </form>
+      <div id="account"></div>
+    </div>
+  </header>
+  <div class="shell">
+    <aside class="rail"><nav id="navigation" aria-label="Разделы CeZeOs"></nav>
+      <div class="rail-footer"><span class="status-dot"></span> Локальный регион</div>
+    </aside>
+    <main id="main" tabindex="-1" aria-busy="true"></main>
+    <aside class="side" id="sidebar"></aside>
+  </div>
+  <nav class="mobile-nav" id="mobile" aria-label="Разделы CeZeOs на телефоне"></nav>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <div class="dialog-top"><h2 id="dialog-title"></h2><button type="button" class="icon-button" id="close" aria-label="Закрыть" data-icon="x"></button></div>
+    <div id="dialog-body"></div>
+    <p id="dialog-error" class="form-error" role="alert" hidden></p>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

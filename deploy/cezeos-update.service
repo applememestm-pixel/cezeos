@@ -1,0 +1,9 @@
+[Unit]
+Description=Update the CeZeOs Region container
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/cezeos
+ExecStart=/usr/bin/node /opt/cezeos/update.mjs cezeos
