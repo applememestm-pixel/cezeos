@@ -565,4 +565,14 @@ const server = createServer(async (req, res) => {
 
 const bind = process.env.CEZEOS_BIND || '127.0.0.1';
 server.listen(requestedPort, bind, () => console.log(`CeZeOs · http://127.0.0.1:${server.address().port}/`));
-for (const signal of ['SIGTERM','SIGINT']) process.once(signal,()=>server.close(()=>db.close()));
+let stopping = false;
+function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  const deadline = setTimeout(() => server.closeAllConnections(), 8000).unref();
+  server.close(() => {
+    clearTimeout(deadline);
+    db.close();
+  });
+}
+for (const signal of ['SIGTERM','SIGINT']) process.once(signal,shutdown);

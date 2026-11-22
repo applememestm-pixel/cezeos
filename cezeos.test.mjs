@@ -47,9 +47,10 @@ test('shell, demo sessions, media visibility, friends, reactions, and comments',
   assert.match(await (await call('')).text(), /CeZeOs/);
   const seeded = await (await call('api/posts')).json();
   assert.equal(seeded.length, 3);
-  await call('assets/after-rain.png');
-  await call('assets/between-stations.wav');
-  await call('manifest.webmanifest');
+  for (const asset of ['assets/after-rain.png', 'assets/between-stations.wav', 'manifest.webmanifest']) {
+    const response = await call(asset);
+    assert.ok((await response.arrayBuffer()).byteLength > 0);
+  }
   await call('api/posts', { method: 'POST', data: { body: 'guest' }, status: 401 });
   const a = await asUser('Первый автор'), b = await asUser('Второй автор');
   const response = await call('api/posts', {
