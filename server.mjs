@@ -15,6 +15,8 @@ const maxMedia = 24 * 1024 * 1024;
 const telegramConfig = telegramSettings(process.env);
 const sessionAge = 30 * 24 * 60 * 60;
 const loopbackHost = /^(localhost|127\.0\.0\.1)(:\d+)?$/;
+const demoAllowed = process.env.CEZEOS_ALLOW_DEMO === '1';
+const loopbackPeer = (address) => address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 const assets = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.webp': 'image/webp',
@@ -214,7 +216,11 @@ async function api(req, res, url) {
   const publicOrigin = req.headers.host === region.host ? region.descriptor.origin : null;
   const providerOrigin = telegramConfig && req.headers.host === telegramConfig.host ? telegramConfig.origin : null;
   const secureSession = publicOrigin?.startsWith('https:') ?? false;
-  const demo = loopbackHost.test(req.headers.host) && process.env.CEZEOS_ALLOW_DEMO !== '0';
+  // CZ-SEC-001: demo sign-in (an account with no login at all) only when the
+  // operator turned it on explicitly AND the connection really comes from this
+  // machine. The Host header alone was spoofable: `Host: localhost` from any
+  // address opened it on a bare `node server.mjs` bound to 0.0.0.0.
+  const demo = demoAllowed && loopbackHost.test(req.headers.host || '') && loopbackPeer(req.socket.remoteAddress);
   if (method === 'GET' && resource === 'auth' && id === 'telegram' && ['start','callback'].includes(action) && path.length === 3) {
     return handleTelegram(req, res, url);
   }
