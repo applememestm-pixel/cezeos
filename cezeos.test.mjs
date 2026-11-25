@@ -12,7 +12,7 @@ let server, directory, url;
 before(async () => {
   directory = await mkdtemp(resolve(root, 'data-test-'));
   server = spawn(process.execPath, ['server.mjs'], {
-    cwd: root, env: { ...process.env, CEZEOS_DATA_DIR: directory, CEZEOS_PORT: '0' }
+    cwd: root, env: { ...process.env, CEZEOS_DATA_DIR: directory, CEZEOS_PORT: '0', CEZEOS_ALLOW_DEMO: '1' }
   });
   const failed = once(server, 'exit').then(([code]) => { throw new Error('Server exited before ready: ' + code); });
   const received = once(server.stdout, 'data').then(([chunk]) => String(chunk).match(/http:\/\/127\.0\.0\.1:\d+\//)?.[0]);

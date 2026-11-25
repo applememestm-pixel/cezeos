@@ -54,7 +54,11 @@ export function openStore(path) {
     CREATE INDEX IF NOT EXISTS posts_chronology ON posts (created DESC);
     CREATE INDEX IF NOT EXISTS comments_post ON comments (post, created);
   `);
-  if (!db.prepare('SELECT 1 FROM profiles WHERE id = ?').get('liza')) seed(db);
+  // Sample people, groups and posts only for demos and tests (CZ-SEC-001):
+  // they were written into every new production database. Databases that
+  // already have them keep them — the operator removes them by hand.
+  const sample = process.env.CEZEOS_SAMPLE_DATA === '1' || process.env.CEZEOS_ALLOW_DEMO === '1';
+  if (sample && !db.prepare('SELECT 1 FROM profiles WHERE id = ?').get('liza')) seed(db);
   return db;
 }
 
