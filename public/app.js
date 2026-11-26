@@ -233,7 +233,8 @@ async function view(page,id){
       {css:'btn primary',data:idAttr(id)+' data-active="'+(!member&&!pending)+'"'});
     const requests=group.requests?.length?panel('<h2>Заявки на вступление</h2>'+group.requests.map(person=>row(avatar(person,'round')+escape(person.name)+[true,false].map(ok=>
       btn('group-request',ok?'Принять':'Отклонить',{data:idAttr(id)+' data-user="'+escape(person.id)+'" data-active="'+ok+'"'})).join(''))).join('')):'';
-    return {list:result.list,html:hero(group,(group.closed?'Закрытое':'Открытое')+' сообщество · Участники: '+group.size,tools)+
+    const wikiLink=(!group.closed||member||owner)?'<a class="btn" href="'+link('group-wiki',id)+'">'+icon('book',17)+'Вики</a>':'';
+    return {list:result.list,html:hero(group,(group.closed?'Закрытое':'Открытое')+' сообщество · Участники: '+group.size,tools+wikiLink)+
       (member?composeCard(id):'')+stack(requests+(group.closed&&!member?empty('Стена доступна участникам сообщества.'):result.html))};
   }
   if(page==='profile'){
@@ -251,15 +252,26 @@ async function view(page,id){
   }
   if(page==='wiki'&&!id){
     const [entries,result]=await Promise.all([api('wiki'),posts({kind:'article'})]);
-    const catalog=entries.map(item=>'<a class="list-item" href="'+link('wiki',item.id)+'"><span class="avatar">'+icon('book')+'</span><div><strong>'+escape(item.title)+'</strong><div class="muted small">'+escape(item.category)+'</div></div></a>').join('');
-    return {list:result.list,html:heading('Статьи и Wiki','',btn('wiki-edit','Новая статья',{css:'btn primary',symbol:'plus'}))+stack(panel(catalog)+'<h2>Статьи участников</h2>'+result.html)};
+    return {list:result.list,html:heading('Статьи и Wiki','',btn('wiki-edit','Новая статья',{css:'btn primary',symbol:'plus'}))+stack(panel(wikiCatalog(entries))+'<h2>Статьи участников</h2>'+result.html)};
+  }
+  if(page==='group-wiki'){
+    const [group,entries,settings]=await Promise.all([api('groups/'+uri(id)),api('wiki?'+params({group:id})),api('groups/'+uri(id)+'/wiki')]);
+    const tools=(settings.member?btn('wiki-edit','Новая статья',{css:'btn primary',symbol:'plus',data:'data-group="'+escape(id)+'"'}):'')+
+      (settings.moderator?btn('wiki-group-settings','Права',{symbol:'settings',data:idAttr(id)})+btn('wiki-group-log','Журнал',{symbol:'clock',data:idAttr(id)}):'');
+    return {html:heading('Вики · '+group.name,'Режим: '+WIKI_MODES[settings.mode],tools)+stack(entries.length?panel(wikiCatalog(entries)):empty('Статей пока нет.'))};
   }
   if(page==='wiki'){
-    const [entry]=await api('wiki/'+uri(id));
-    const data=idAttr(id);
-    return {html:heading(entry.title,entry.category)+panel('<p class="preline">'+escape(entry.body)+'</p>'+
-      row(btn('wiki-edit','Редактировать',{symbol:'pen',data})+btn('wiki-history','История',{symbol:'clock',data}))+
-      '<p class="muted small">Версия '+entry.revision+' · '+escape(entry.profile.name)+' · '+time(entry.created)+'</p>')};
+    const view=await api('wiki/'+uri(id));
+    const entry=view.versions[0], can=view.rights, data=idAttr(id);
+    const mode=WIKI_MODES[can.mode]+(view.page.protected?' · защищена':'')+(can.inherited&&view.page.group?' (как в сообществе)':'');
+    const tools=(can.edit?btn('wiki-edit','Редактировать',{symbol:'pen',data}):'')+
+      (can.suggest?btn('wiki-edit','Предложить правку',{symbol:'pen',data:data+' data-suggest="1"'}):'')+
+      btn('wiki-history','История',{symbol:'clock',data})+btn('wiki-log','Журнал',{data})+
+      (can.moderate?btn('wiki-settings','Настройки',{symbol:'settings',data}):'');
+    const pending=view.suggestions.length?panel('<h2>Предложения</h2>'+view.suggestions.map(item=>row('<span>'+escape(item.profile?.name||'')+' · к версии '+item.base+' · '+time(item.created)+'</span>'+
+      btn('wiki-suggestion','Открыть',{data:data+' data-key="'+escape(item.id)+'"'}))).join('')):'';
+    return {html:heading(entry.title,entry.category)+stack(panel('<p class="preline">'+escape(entry.body)+'</p>'+row(tools)+
+      '<p class="muted small">Версия '+entry.revision+' · '+escape(entry.profile?.name||'')+' · '+time(entry.created)+' · '+escape(mode)+'</p>')+pending)};
   }
   if(page==='search'){
     const [people,groups,result]=await Promise.all([api('profiles?'+params({q:id})),api('groups'),posts({q:id})]);
@@ -363,10 +375,20 @@ async function loadComments(id){
     (state.me?'<form class="comment-form" data-post="'+escape(id)+'"><input name="body" aria-label="Комментарий" maxlength="1000" placeholder="Написать комментарий" required><button type="submit" class="btn">Отправить</button></form>':btn('account','Войдите, чтобы ответить'));
   target.hidden=false;
 }
-function editWiki(entry,latest=0){
-  open(entry?'Редактировать статью':'Новая статья Wiki',form('wiki-form',
+const WIKI_ACTIONS={create:'создал(а)',edit:'правка',suggest:'предложение',accept:'принято',reject:'отклонено',rollback:'откат',mode:'режим',
+  protect:'защита',unprotect:'защита снята','group-mode':'режим сообщества','grant-editor':'дан редактор','revoke-editor':'снят редактор','grant-moderator':'дан модератор','revoke-moderator':'снят модератор'};
+const WIKI_MODES={open:'открытая',trusted:'доверенные редакторы',closed:'автор и модераторы',suggest:'через предложения'};
+function wikiCatalog(entries){
+  return entries.map(item=>'<a class="list-item" href="'+link('wiki',item.id)+'"><span class="avatar">'+icon('book')+'</span><div><strong>'+escape(item.title)+'</strong><div class="muted small">'+escape(item.category)+'</div></div></a>').join('');
+}
+function editWiki(entry,latest=0,{suggest=false,group=''}={}){
+  open(suggest?'Предложить правку':entry?'Редактировать статью':'Новая статья Wiki',form('wiki-form',
     field('title','Название','required maxlength="120"',entry?.title)+field('category','Категория','maxlength="60"',entry?.category)+
-    area('body','Текст статьи','required maxlength="12000"',entry?.body),'Сохранить',idAttr(entry?.id||'')+' data-revision="'+latest+'"'));
+    area('body','Текст статьи','required maxlength="12000"',entry?.body),suggest?'Отправить на проверку':'Сохранить',
+    idAttr(entry?.id||'')+' data-revision="'+latest+'"'+(suggest?' data-suggest="1"':'')+(group?' data-group="'+escape(group)+'"':'')));
+}
+function diffView(lines){
+  return '<pre class="wiki-diff">'+lines.map(item=>'<span class="'+(item.op==='+'?'add':item.op==='-'?'del':'same')+'">'+escape(item.op+' '+item.line)+'</span>').join('\n')+'</pre>';
 }
 async function perform(key,data){
   const id=data.id?uri(data.id):'';
@@ -407,16 +429,67 @@ async function perform(key,data){
       return open('Ссылка на публикацию',field('url','Ссылка','readonly',url));
     }
     case 'wiki-history': {
-      const versions=await api('wiki/'+id);
+      const {versions}=await api('wiki/'+id);
+      const latest=versions[0].revision;
       return open('История статьи',stack(versions.map(version=>row(
-        '<span>Версия '+version.revision+' · '+escape(version.profile.name)+' · '+time(version.created)+'</span>'+
-        btn('wiki-version','Открыть',{data:idAttr(data.id)+' data-key="'+version.revision+'"'}))).join('')));
+        '<span>Версия '+version.revision+' · '+escape(version.profile?.name||'')+' · '+time(version.created)+'</span>'+
+        btn('wiki-version','Открыть',{data:idAttr(data.id)+' data-key="'+version.revision+'"'})+
+        (version.revision===latest?'':btn('wiki-diff','Сравнить с текущей',{data:idAttr(data.id)+' data-key="'+version.revision+'" data-to="'+latest+'"'})))).join('')));
     }
+    case 'wiki-diff': {
+      const d=await api('wiki/'+id+'/diff?'+params({from:data.key,to:data.to}));
+      return open('Версия '+d.from+' → '+d.to,stack((d.title[0]!==d.title[1]?'<p class="muted small">Название: '+escape(d.title[0])+' → '+escape(d.title[1])+'</p>':'')+diffView(d.diff)));
+    }
+    case 'wiki-log': {
+      const entries=await api('wiki/'+id+'/log');
+      return open('Журнал статьи',stack(entries.map(item=>'<p class="small">'+time(item.created)+' · '+escape(item.profile?.name||item.actor)+' · '+escape(WIKI_ACTIONS[item.action]||item.action)+(item.detail?' · '+escape(item.detail):'')+'</p>').join('')||empty('Пусто.')));
+    }
+    case 'wiki-group-log': {
+      const entries=await api('groups/'+id+'/wiki-log');
+      return open('Журнал вики сообщества',stack(entries.map(item=>'<p class="small">'+time(item.created)+' · '+escape(item.profile?.name||item.actor)+' · '+escape(WIKI_ACTIONS[item.action]||item.action)+(item.detail?' · '+escape(item.detail):'')+'</p>').join('')||empty('Пусто.')));
+    }
+    case 'wiki-suggestion': {
+      const view=await api('wiki/'+id);
+      const item=await api('wiki/'+id+'/suggestions/'+uri(data.key));
+      const decide=view.rights.review?row(btn('wiki-decide','Принять',{css:'btn primary',data:idAttr(data.id)+' data-key="'+escape(data.key)+'" data-active="true"'})+
+        btn('wiki-decide','Отклонить',{data:idAttr(data.id)+' data-key="'+escape(data.key)+'" data-active="false"'})):'';
+      return open('Предложение · '+escape(item.profile?.name||''),stack('<h3>'+escape(item.title)+'</h3>'+diffView(item.diff)+decide));
+    }
+    case 'wiki-decide':
+      await api('wiki/'+id+'/suggestions/'+uri(data.key),'POST',{accept:data.active==='true'});
+      dialog.close();
+      return render();
+    case 'wiki-rollback': {
+      await api('wiki/'+id+'/rollback','POST',{revision:Number(data.key),current:Number(data.to)});
+      dialog.close();
+      return render();
+    }
+    case 'wiki-settings': {
+      const view=await api('wiki/'+id);
+      return open('Настройки статьи',form('wiki-settings-form',
+        '<div class="field">Кто правит'+choice('mode','Кто правит',[['','Как в сообществе'],...Object.entries(WIKI_MODES)],view.page.mode||'')+'</div>'+
+        '<label><input type="checkbox" name="protected"'+(view.page.protected?' checked':'')+'> Защищена: правят только модераторы</label>','Сохранить',idAttr(data.id)));
+    }
+    case 'wiki-group-settings': {
+      const settings=await api('groups/'+id+'/wiki');
+      const roles=settings.roles.map(item=>row('<span>'+escape(item.profile?.name||item.member)+' · '+(item.role==='moderator'?'модератор':'редактор')+'</span>'+
+        btn('wiki-role','Снять',{data:idAttr(data.id)+' data-user="'+escape(item.member)+'" data-key="'+item.role+'"'}))).join('');
+      return open('Права в вики сообщества',stack(form('wiki-group-form',
+        '<div class="field">Кто правит'+choice('mode','Кто правит',Object.entries(WIKI_MODES),settings.mode)+'</div>','Сохранить режим',idAttr(data.id))+
+        (roles||'<p class="muted small">Редакторов и модераторов пока нет.</p>')+
+        form('wiki-role-form',field('member','Участник (ID или @ник)','required maxlength="80"')+
+          '<div class="field">Роль'+choice('role','Роль',[['editor','Редактор'],['moderator','Модератор']],'editor')+'</div>','Дать право',idAttr(data.id))));
+    }
+    case 'wiki-role':
+      await api('groups/'+id+'/wiki','POST',{member:data.user,role:data.key,add:false});
+      dialog.close();
+      return render();
     case 'wiki-version': {
-      const versions=await api('wiki/'+id);
+      const view=await api('wiki/'+id);
+      const versions=view.versions;
       const version=versions.find(item=>item.revision===Number(data.key));
       if(!version) return;
-      const restore=version===versions[0]?'':btn('wiki-edit','Восстановить версию',{data:idAttr(data.id)+' data-key="'+version.revision+'"'});
+      const restore=version===versions[0]||!view.rights.edit?'':btn('wiki-rollback','Откатить к этой версии',{data:idAttr(data.id)+' data-key="'+version.revision+'" data-to="'+versions[0].revision+'"'});
       return open('Версия '+version.revision,stack('<h3>'+escape(version.title)+'</h3><p class="preline">'+escape(version.body)+'</p>'+row(restore)));
     }
   }
@@ -514,10 +587,10 @@ async function perform(key,data){
       return open('Новое сообщество',form('group-form',field('name','Название','required maxlength="65"')+
         area('bio','Описание','maxlength="400"')+'<label><input type="checkbox" name="closed"> Закрытое сообщество</label>','Создать сообщество'));
     case 'wiki-edit': {
-      if(!id) return editWiki();
-      const versions=await api('wiki/'+id);
+      if(!id) return editWiki(null,0,{group:data.group||''});
+      const {versions}=await api('wiki/'+id);
       const entry=data.key?versions.find(item=>item.revision===Number(data.key)):versions[0];
-      if(entry) return editWiki(entry,versions[0].revision);
+      if(entry) return editWiki(entry,versions[0].revision,{suggest:data.suggest==='1'});
       return;
     }
   }
@@ -593,10 +666,25 @@ async function save(t){
       break;
     }
     case 'wiki-form': {
-      const article=await api('wiki'+(t.dataset.id?'/'+uri(t.dataset.id):''),'POST',{...values,revision:Number(t.dataset.revision)});
+      if(t.dataset.suggest){
+        await api('wiki/'+uri(t.dataset.id)+'/suggest','POST',{...values,revision:Number(t.dataset.revision)});
+        tell('Предложение отправлено редакторам.');
+        destination=['wiki',t.dataset.id];
+        break;
+      }
+      const article=await api('wiki'+(t.dataset.id?'/'+uri(t.dataset.id):''),'POST',{...values,revision:Number(t.dataset.revision),...(t.dataset.group?{group:t.dataset.group}:{})});
       destination=['wiki',article.id];
       break;
     }
+    case 'wiki-settings-form':
+      await api('wiki/'+uri(t.dataset.id)+'/settings','POST',{mode:values.mode||null,protected:fields.has('protected')});
+      break;
+    case 'wiki-group-form':
+      await api('groups/'+uri(t.dataset.id)+'/wiki','POST',{mode:values.mode});
+      break;
+    case 'wiki-role-form':
+      await api('groups/'+uri(t.dataset.id)+'/wiki','POST',{member:values.member.trim(),role:values.role,add:true});
+      break;
     default: return;
   }
   if(dialog.open) dialog.close();
