@@ -97,10 +97,13 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
   /// Who is `member` for pages of `group` (null: site-wide)?
   function standing(member, group) {
     const g = group ? getGroup(group) : null;
-    const moderator = Boolean(member) && (group
-      ? (g?.owner === member || hasRole(scopeOf(group), member, 'moderator'))
-      : siteModerators.has(member));
     const inCommunity = Boolean(member) && (group ? membership(member, group) === 'member' : true);
+    // A role given in a community lasts only while its holder is a member:
+    // someone who left keeps no right there (review: they could still edit
+    // as a moderator or accept suggestions as an editor).
+    const moderator = Boolean(member) && (group
+      ? (g?.owner === member || (inCommunity && hasRole(scopeOf(group), member, 'moderator')))
+      : siteModerators.has(member));
     return { g, moderator, inCommunity };
   }
 
@@ -110,7 +113,7 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
     const { g, moderator, inCommunity } = standing(member, group);
     const readable = !g?.closed || inCommunity || moderator;
     const mode = p.mode || groupMode(group);
-    const editor = moderator || hasRole(scopeOf(group), member, 'editor') || (p.id && hasRole('page:' + p.id, member, 'editor'));
+    const editor = moderator || (inCommunity && (hasRole(scopeOf(group), member, 'editor') || Boolean(p.id && hasRole('page:' + p.id, member, 'editor'))));
     const author = Boolean(member) && p.author === member;
     let edit = false, suggest = false;
     if (member && readable && inCommunity) {

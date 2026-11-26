@@ -224,3 +224,53 @@ test('bookmarks are private, idempotent, and respect current visibility', async 
   await call('api/posts/after-rain/bookmark', { method: 'POST', cookie: b.cookie, data: { active: false } });
   assert.deepEqual(await list(b), []);
 });
+
+test('wiki: no way around the rights through the API', async () => {
+  const owner = await asUser('Владелец ACL'), ed = await asUser('Бывший редактор'), mod = await asUser('Бывший модератор'), m = await asUser('Участник ACL');
+  const g = await community(owner, ed, mod, m);
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { mode: 'suggest' } });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: ed.user.id, role: 'editor', add: true } });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: mod.user.handle, role: 'moderator', add: true } });
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: owner.cookie, data: { title: 'Статья', body: 'v1', group: g }, status: 201 })).json();
+  const sid = (await (await call('api/wiki/' + id + '/suggest', { method: 'POST', cookie: m.cookie, data: { title: 'Статья', body: 'v2', revision: 1 }, status: 201 })).json()).id;
+  // They leave the community: their roles stop working.
+  for (const who of [ed, mod]) await call('api/groups/' + g + '/join', { method: 'POST', cookie: who.cookie, data: { active: false } });
+  await call('api/wiki/' + id + '/suggestions/' + sid, { method: 'POST', cookie: ed.cookie, data: { accept: true }, status: 403 });
+  await edit(mod, id, 1, 'после выхода', 403);
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: mod.cookie, data: { protected: false }, status: 403 });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: mod.cookie, data: { mode: 'open' }, status: 403 });
+  // A member can't name themselves editor, nor give rights to an outsider.
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: m.cookie, data: { member: m.user.id, role: 'editor', add: true }, status: 403 });
+  const out = await asUser('Посторонний ACL');
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: out.user.id, role: 'editor', add: true }, status: 400 });
+  // Rights of one community don't reach another's pages.
+  const g2 = await community(m);
+  const { id: other } = await (await call('api/wiki', { method: 'POST', cookie: m.cookie, data: { title: 'Чужая', body: 'x', group: g2 }, status: 201 })).json();
+  await call('api/groups/' + g2 + '/wiki', { method: 'POST', cookie: m.cookie, data: { mode: 'closed' } });
+  await edit(owner, other, 1, 'не моё сообщество', 403);
+  await call('api/wiki/' + other + '/settings', { method: 'POST', cookie: owner.cookie, data: { protected: true }, status: 403 });
+  // Bad input: unknown mode, a suggestion of another page, a missing revision.
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: owner.cookie, data: { mode: 'everyone' }, status: 400 });
+  await call('api/wiki/' + other + '/suggestions/' + sid, { cookie: m.cookie, status: 404 });
+  await call('api/wiki/' + id, { method: 'POST', cookie: owner.cookie, data: { title: 'x', body: 'x' }, status: 409 });
+  await call('api/wiki/' + id + '/rollback', { method: 'POST', cookie: owner.cookie, data: { revision: 99, current: 1 }, status: 400 });
+});
+
+test('wiki: simultaneous edits and rollbacks — one wins, none is lost silently', async () => {
+  const owner = await asUser('Одновременный'), a = await asUser('Правка А'), b = await asUser('Правка Б');
+  const g = await community(owner, a, b);
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: owner.cookie, data: { title: 'Гонка', body: 'v1', group: g }, status: 201 })).json();
+  const send = (who, body) => fetch(url + 'api/wiki/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: who.cookie }, body: JSON.stringify({ title: 'Гонка', body, revision: 1 }) }).then(r => r.status);
+  const statuses = await Promise.all([send(a, 'от А'), send(b, 'от Б'), send(owner, 'от владельца'), send(a, 'ещё от А')]);
+  assert.equal(statuses.filter(s => s === 201).length, 1, String(statuses));
+  assert.equal(statuses.filter(s => s === 409).length, 3);
+  const view = await page(a.cookie, id);
+  assert.equal(view.versions.length, 2);
+  // Two rollbacks at once against the same current version: one.
+  const back = who => fetch(url + 'api/wiki/' + id + '/rollback', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: who.cookie }, body: JSON.stringify({ revision: 1, current: 2 }) }).then(r => r.status);
+  const rb = await Promise.all([back(a), back(b)]);
+  assert.deepEqual(rb.sort(), [201, 409]);
+  const after = await page(a.cookie, id);
+  assert.equal(after.versions[0].body, 'v1');
+  assert.equal(after.versions.length, 3);
+});
