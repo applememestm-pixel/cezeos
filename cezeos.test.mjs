@@ -55,13 +55,13 @@ test('shell, demo sessions, media visibility, friends, reactions, and comments',
   const a = await asUser('Первый автор'), b = await asUser('Второй автор');
   const response = await call('api/posts', {
     method: 'POST', cookie: a.cookie, status: 201,
-    data: { body: 'закрытое вложение', title: 'Запись', visibility: 'friends', media: { mime: 'audio/mpeg', data: 'AQIDBA==' } }
+    data: { body: 'закрытое вложение', title: 'Запись', visibility: 'friends', media: { mime: 'audio/mpeg', data: 'SUQzBA==' } }
   });
   const { id } = await response.json();
   await call('api/posts/' + id, { status: 404 });
   await call('api/media/' + id, { cookie: b.cookie, status: 404 });
   const ownerMedia = await call('api/media/' + id, { cookie: a.cookie, headers: { Range: 'bytes=1-2' }, status: 206 });
-  assert.deepEqual([...new Uint8Array(await ownerMedia.arrayBuffer())], [2, 3]);
+  assert.deepEqual([...new Uint8Array(await ownerMedia.arrayBuffer())], [0x44, 0x33]);
   await call('api/profiles/' + b.user.id + '/friend', { method: 'POST', cookie: a.cookie, data: { command: 'request' } });
   await call('api/profiles/' + a.user.id + '/friend', { method: 'POST', cookie: b.cookie, data: { command: 'accept' } });
   const post = await (await call('api/posts/' + id, { cookie: b.cookie })).json();

@@ -8,6 +8,7 @@ import { telegramSettings, telegramLogin } from './telegram.mjs';
 import { openRegion } from './region.mjs';
 import { createGovernance } from './governance.mjs';
 import { createEcosystem } from './ecosystem.mjs';
+import { rateLimiter, uploadSlots, clientAddress, matchesType } from './limits.mjs';
 
 const root = fileURLToPath(new URL('./public/', import.meta.url));
 const data = resolve(process.env.CEZEOS_DATA_DIR || fileURLToPath(new URL('./data/', import.meta.url)));
@@ -29,6 +30,12 @@ const formats = {
   'video/mp4': 'video', 'video/webm': 'video'
 };
 const workTypes = new Set(['Оригинал', 'Чужая запись', 'Кавер', 'Ремикс', 'Сэмпл', 'Совместная работа']);
+// CZ-SEC-003. Writes are counted per account, or per address before sign-in.
+const memberWrites = rateLimiter({ burst: 60, perSecond: 1 });
+const guestWrites = rateLimiter({ burst: 20, perSecond: 0.2 });
+// A post with a file is held in memory whole (up to about 32 MiB each).
+const largeBody = 256 * 1024;
+const enterUpload = uploadSlots({ total: 4, each: 2 });
 
 mkdirSync(data, { recursive: true });
 const region = openRegion(data, process.env);
@@ -221,6 +228,11 @@ async function api(req, res, url) {
   // machine. The Host header alone was spoofable: `Host: localhost` from any
   // address opened it on a bare `node server.mjs` bound to 0.0.0.0.
   const demo = demoAllowed && loopbackHost.test(req.headers.host || '') && loopbackPeer(req.socket.remoteAddress);
+  // Reading is free; signing in through a provider creates accounts, so it counts.
+  if (resource === 'auth' || (method !== 'GET' && method !== 'HEAD')) {
+    if (member) memberWrites(member);
+    else guestWrites(clientAddress(req.socket.remoteAddress, req.headers['x-forwarded-for']));
+  }
   if (method === 'GET' && resource === 'auth' && id === 'telegram' && ['start','callback'].includes(action) && path.length === 3) {
     return handleTelegram(req, res, url);
   }
@@ -338,31 +350,38 @@ async function api(req, res, url) {
   }
   if (resource === 'posts' && !id && method === 'POST') {
     needMember(member);
-    const input = await payload(req, Math.ceil(maxMedia / 3) * 4 + 65536);
-    const body = clean(input.body, 4000);
-    const title = clean(input.title, 120);
-    const credit = clean(input.credit, 150);
-    const group = input.group || null;
-    if (group && (typeof group !== 'string' || membership(member, group) !== 'member')) {
-      throw problem(403, 'Для публикации нужно вступить в сообщество.');
+    const length = Number(req.headers['content-length'] ?? Infinity);
+    const release = length > largeBody ? enterUpload(member) : null;
+    try {
+      const input = await payload(req, Math.ceil(maxMedia / 3) * 4 + 65536);
+      const body = clean(input.body, 4000);
+      const title = clean(input.title, 120);
+      const credit = clean(input.credit, 150);
+      const group = input.group || null;
+      if (group && (typeof group !== 'string' || membership(member, group) !== 'member')) {
+        throw problem(403, 'Для публикации нужно вступить в сообщество.');
+      }
+      const visibility = input.visibility || 'public';
+      if (!['public', 'members', 'friends', 'private'].includes(visibility)) throw problem(400, 'Неизвестный режим видимости.');
+      const mime = input.media?.mime;
+      const kind = mime ? (typeof mime === 'string' && Object.hasOwn(formats, mime) ? formats[mime] : null) : input.article === true ? 'article' : 'text';
+      if ((input.media && !mime) || !kind) throw problem(400, 'Формат вложения не поддерживается.');
+      if (!body && !mime) throw problem(400, 'Введите текст или добавьте вложение.');
+      if ((mime || kind === 'article') && !title) throw problem(400, 'Укажите название.');
+      const workType = workTypes.has(input.workType) ? input.workType : 'Оригинал';
+      const id = randomUUID();
+      const bytes = mime && typeof input.media.data === 'string' ? Buffer.from(input.media.data, 'base64') : null;
+      if (mime && (!bytes?.length || bytes.length > maxMedia)) throw problem(413, 'Размер вложения должен быть до 24 МиБ.');
+      if (mime && !matchesType(mime, bytes)) throw problem(400, 'Содержимое файла не соответствует его формату.');
+      transaction(() => {
+        db.prepare(`INSERT INTO posts (id, author, group_id, body, kind, title, credit, work_type, media_mime, visibility, created)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, member, group, body, kind, title, credit || (mime ? 'Автор неизвестен' : ''), workType, mime || null, visibility, Date.now());
+        if (bytes) db.prepare('INSERT INTO attachments VALUES (?, ?)').run(id, bytes);
+      });
+      return json(res, { id }, 201);
+    } finally {
+      release?.();
     }
-    const visibility = input.visibility || 'public';
-    if (!['public', 'members', 'friends', 'private'].includes(visibility)) throw problem(400, 'Неизвестный режим видимости.');
-    const mime = input.media?.mime;
-    const kind = mime ? (typeof mime === 'string' && Object.hasOwn(formats, mime) ? formats[mime] : null) : input.article === true ? 'article' : 'text';
-    if ((input.media && !mime) || !kind) throw problem(400, 'Формат вложения не поддерживается.');
-    if (!body && !mime) throw problem(400, 'Введите текст или добавьте вложение.');
-    if ((mime || kind === 'article') && !title) throw problem(400, 'Укажите название.');
-    const workType = workTypes.has(input.workType) ? input.workType : 'Оригинал';
-    const id = randomUUID();
-    const bytes = mime && typeof input.media.data === 'string' ? Buffer.from(input.media.data, 'base64') : null;
-    if (mime && (!bytes?.length || bytes.length > maxMedia)) throw problem(413, 'Размер вложения должен быть до 24 МиБ.');
-    transaction(() => {
-      db.prepare(`INSERT INTO posts (id, author, group_id, body, kind, title, credit, work_type, media_mime, visibility, created)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, member, group, body, kind, title, credit || (mime ? 'Автор неизвестен' : ''), workType, mime || null, visibility, Date.now());
-      if (bytes) db.prepare('INSERT INTO attachments VALUES (?, ?)').run(id, bytes);
-    });
-    return json(res, { id }, 201);
   }
   if ((resource === 'posts' || resource === 'media') && id) {
     const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(id);
@@ -564,6 +583,9 @@ const server = createServer(async (req, res) => {
     else staticFile(req, res, url);
   } catch (error) {
     if (!error.status) console.error(error);
+    // A refused upload is still read (and dropped), so the answer arrives.
+    req.resume();
+    if (error.retryAfter && !res.headersSent) res.setHeader('Retry-After', String(error.retryAfter));
     if (!res.headersSent) json(res, { error: error.status ? error.message : 'Не удалось выполнить запрос.' }, error.status || 500);
     else res.destroy();
   }
