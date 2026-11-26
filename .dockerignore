@@ -7,6 +7,7 @@
 !region.mjs
 !governance.mjs
 !ecosystem.mjs
+!limits.mjs
 !operator.mjs
 !public/
 !public/**

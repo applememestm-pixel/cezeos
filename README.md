@@ -76,6 +76,12 @@ docker compose -p cezeos exec -T region node operator.mjs set-triumvirs @nick1 @
 
 В `mobile/android/` находится проект Android Trusted Web Activity с пакетом `org.cezeos.app`. Для сборки нужны JDK 17, Android SDK 36 и Gradle 8.13. Укажите HTTPS-адрес Региона как `CEZEOS_APP_ORIGIN` и выполните `gradle -p mobile/android assembleDebug signingReport`, либо запустите workflow «Android preview» с адресом. APK для тестирования появится в `mobile/android/app/build/outputs/apk/debug/` или в артефактах запуска CI. Укажите SHA-256 сертификата используемой подписи в `CEZEOS_ANDROID_SHA256`. Сервер опубликует его на `/.well-known/assetlinks.json` для полноэкранного запуска. Тестовый ключ GitHub Actions пересоздаётся, для распространения нужен постоянный ключ. [Руководство по Trusted Web Activity](https://developer.chrome.com/docs/android/trusted-web-activity/quick-start)
 
+## Ограничения запросов
+
+Изменяющие запросы: у вошедшего участника до 60 сразу, затем 1 в секунду; без входа — до 20 с адреса, затем 1 в 5 секунд. Чтение не ограничивается. Вложения: не больше двух одновременных загрузок на участника и четырёх на сервер; начало файла должно соответствовать заявленному формату. Лишний запрос получает `429` и `Retry-After`. Счётчики хранятся в памяти процесса.
+
+Адрес без входа берётся из последней записи `X-Forwarded-For`, только если соединение пришло с этой машины или из частной сети (обратный прокси). Если порт сервера открыт в частную сеть напрямую, клиент из неё может подставить этот заголовок и обойти ограничение по адресу.
+
 ## Проверка
 
 ```powershell
