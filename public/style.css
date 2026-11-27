@@ -25,6 +25,10 @@ h3 { font-size: 1rem; line-height: 1.35; }
 .muted, time { color: var(--muted); }
 .small { font-size: .84rem; }
 .preline { white-space: pre-wrap; overflow-wrap: anywhere; }
+.wiki-diff { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); white-space: pre-wrap; overflow-wrap: anywhere; font-size: .86rem; max-height: 60vh; overflow: auto; }
+.wiki-diff .add { color: var(--accent); }
+.wiki-diff .del { color: var(--danger); text-decoration: line-through; }
+.wiki-diff .same { color: var(--muted); }
 [hidden] { display: none !important; }
 .skip { position: fixed; left: 1rem; top: 1rem; transform: translateY(-200%); z-index: 9; padding: .65rem 1rem; background: var(--raised); }
 .skip:focus { transform: none; }

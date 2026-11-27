@@ -8,6 +8,7 @@ import { telegramSettings, telegramLogin } from './telegram.mjs';
 import { openRegion } from './region.mjs';
 import { createGovernance } from './governance.mjs';
 import { createEcosystem } from './ecosystem.mjs';
+import { createWiki } from './wiki.mjs';
 
 const root = fileURLToPath(new URL('./public/', import.meta.url));
 const data = resolve(process.env.CEZEOS_DATA_DIR || fileURLToPath(new URL('./data/', import.meta.url)));
@@ -40,6 +41,7 @@ if (governanceRegion && (governanceHome || !region.hasPeer(governanceRegion))) {
 }
 const governance = governanceHome ? createGovernance(db,process.env.CEZEOS_AQUAMARINE_ISSUER) : null;
 const ecosystem = createEcosystem(db, region, process.env, governance?.claim);
+const wiki = createWiki(db, { getGroup: id => getGroup(id), membership: (m, g) => membership(m, g), profile: id => profile(id) });
 const release = JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version;
 const androidCertificates = (process.env.CEZEOS_ANDROID_SHA256 || '').split(',').map(value=>value.trim().toUpperCase()).filter(Boolean);
 if (androidCertificates.some(value=>!/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(value))) throw new Error('Некорректный SHA-256 сертификата Android.');
@@ -478,13 +480,19 @@ async function api(req, res, url) {
     const group = getGroup(id);
     if (!group) throw problem(404, 'Сообщество не найдено.');
     if (!action && method === 'GET') return json(res, groupSummary(group, member));
+    if (action === 'wiki' && method === 'GET') return json(res, wiki.groupView(member, id));
+    if (action === 'wiki' && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.groupSettings(member, id, input))); }
+    if (action === 'wiki-log' && method === 'GET') return json(res, wiki.groupLog(member, id));
     if (action === 'join' && method === 'POST') {
       needMember(member);
       const input = await payload(req);
       if (input.active) {
         db.prepare('INSERT OR IGNORE INTO memberships VALUES (?, ?, ?)').run(member, id, group.closed ? 'pending' : 'member');
       } else if (group.owner !== member) {
-        db.prepare('DELETE FROM memberships WHERE member = ? AND group_id = ?').run(member, id);
+        transaction(() => {
+          db.prepare('DELETE FROM memberships WHERE member = ? AND group_id = ?').run(member, id);
+          wiki.left(member, id);
+        });
       }
       return json(res, groupSummary(group, member));
     }
@@ -500,32 +508,22 @@ async function api(req, res, url) {
     }
   }
 
-  if (resource === 'wiki' && !id && method === 'GET') {
-    return json(res, db.prepare(`SELECT w.* FROM wiki w WHERE revision =
-      (SELECT MAX(revision) FROM wiki WHERE id = w.id) ORDER BY created DESC LIMIT 60`).all());
-  }
-  if (resource === 'wiki' && id && method === 'GET') {
-    const versions = db.prepare('SELECT * FROM wiki WHERE id = ? ORDER BY revision DESC').all(id);
-    if (!versions.length) throw problem(404, 'Статья не найдена.');
-    return json(res, versions.map(item => ({ ...item, profile: profile(item.author) })));
-  }
-  if (resource === 'wiki' && method === 'POST') {
-    needMember(member);
-    const input = await payload(req);
-    const title = clean(input.title, 120);
-    const body = clean(input.body, 12000);
-    const category = clean(input.category, 60) || 'Без категории';
-    if (!title || !body) throw problem(400, 'Укажите название и текст статьи.');
-    const article = id || randomUUID();
-    const revision = transaction(() => {
-      const latest = db.prepare('SELECT MAX(revision) AS revision FROM wiki WHERE id = ?').get(article).revision;
-      if (id && !latest) throw problem(404, 'Статья не найдена.');
-      if (id && input.revision !== latest) throw problem(409, 'Статья обновилась. Откройте её заново.');
-      const next = (latest || 0) + 1;
-      db.prepare('INSERT INTO wiki VALUES (?, ?, ?, ?, ?, ?, ?)').run(article, next, title, category, body, member, Date.now());
-      return next;
-    });
-    return json(res, { id: article, revision }, 201);
+  // Wiki (wiki.mjs): every right is checked there, on the server.
+  if (resource === 'wiki') {
+    const sub = path[3];
+    if (!id && method === 'GET') return json(res, wiki.list(member, url.searchParams.get('group')));
+    if (!id && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.create(member, input)), 201); }
+    if (id && !action && method === 'GET') return json(res, wiki.page(member, id));
+    if (id && !action && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.edit(member, id, input)), 201); }
+    if (action === 'suggest' && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.suggest(member, id, input)), 201); }
+    if (action === 'suggestions' && sub && method === 'GET') return json(res, wiki.suggestion(member, id, sub));
+    if (action === 'suggestions' && sub && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.decide(member, id, sub, input.accept === true))); }
+    if (action === 'history' && method === 'GET') return json(res, wiki.history(member, id, { before: Number(url.searchParams.get('before')) }));
+    if (action === 'versions' && sub && method === 'GET') return json(res, wiki.version(member, id, Number(sub)));
+    if (action === 'diff' && method === 'GET') return json(res, wiki.diff(member, id, Number(url.searchParams.get('from')), Number(url.searchParams.get('to'))));
+    if (action === 'rollback' && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.rollback(member, id, input)), 201); }
+    if (action === 'settings' && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.settings(member, id, input))); }
+    if (action === 'log' && method === 'GET') return json(res, wiki.log(member, id));
   }
   throw problem(404, 'Запрос не найден.');
 }

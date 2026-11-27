@@ -92,7 +92,112 @@ test('closed group approval and conflicting wiki revisions', async () => {
   await call('api/wiki/' + article, { method: 'POST', cookie: b.cookie, data: { title:'Архив',body:'Версия вторая',revision:1 }, status: 201 });
   await call('api/wiki/' + article, { method: 'POST', cookie: a.cookie, data: { title:'Архив',body:'Устаревшее изменение',revision:1 }, status: 409 });
   const history = await (await call('api/wiki/' + article)).json();
-  assert.deepEqual(history.map(version => version.revision), [2, 1]);
+  assert.deepEqual(history.versions.map(version => version.revision), [2, 1]);
+});
+
+// Wiki rights (owner, 26.11): four modes per community and per page,
+// protected pages, suggestions, diff, rollback and a log — all on the server.
+async function community(owner, ...members) {
+  const { id } = await (await call('api/groups', { method: 'POST', cookie: owner.cookie, data: { name: 'Вики-круг' }, status: 201 })).json();
+  for (const m of members) await call('api/groups/' + id + '/join', { method: 'POST', cookie: m.cookie, data: { active: true } });
+  return id;
+}
+const page = (cookie, id) => call('api/wiki/' + id, { cookie }).then(r => r.json());
+const edit = (who, id, revision, body, status = 201) =>
+  call('api/wiki/' + id, { method: 'POST', cookie: who.cookie, data: { title: 'Статья', body, revision }, status });
+
+test('wiki: the four modes, checked on the server', async () => {
+  const owner = await asUser('Владелец вики'), m = await asUser('Участник вики'), e = await asUser('Редактор вики');
+  const outsider = await asUser('Посторонний');
+  const g = await community(owner, m, e);
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: m.cookie, data: { title: 'Статья', body: 'v1', group: g }, status: 201 })).json();
+  // open: every member of the community; not someone outside it; not a guest.
+  await edit(owner, id, 1, 'v2');
+  await edit(outsider, id, 2, 'чужая', 403);
+  await call('api/wiki/' + id, { method: 'POST', data: { title: 'x', body: 'x', revision: 2 }, status: 401 });
+  // trusted: only editors and moderators.
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: m.cookie, data: { mode: 'trusted' }, status: 403 });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { mode: 'trusted' } });
+  await edit(m, id, 2, 'без права', 403);
+  await edit(e, id, 2, 'тоже без права', 403);
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: e.user.id, role: 'editor', add: true } });
+  await edit(e, id, 2, 'v3 редактора');
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: e.user.id, role: 'editor', add: false } });
+  await edit(e, id, 3, 'право снято', 403);
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: m.cookie, data: { member: m.user.id, role: 'moderator', add: true }, status: 403 });
+  // closed: the page's author and moderators.
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { mode: 'closed' } });
+  await edit(e, id, 3, 'не автор', 403);
+  await edit(m, id, 3, 'v4 автора');
+  await edit(owner, id, 4, 'v5 модератора');
+  // A page's own mode wins over the community's: open for this page only.
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: m.cookie, data: { mode: 'open' }, status: 403 });
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: owner.cookie, data: { mode: 'open' } });
+  await edit(e, id, 5, 'v6 открыто');
+  // Protected: moderators only, whatever the mode.
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: owner.cookie, data: { protected: true } });
+  await edit(m, id, 6, 'защищено', 403);
+  await edit(owner, id, 6, 'v7');
+  const view = await page(m.cookie, id);
+  assert.equal(view.page.protected, true);
+  assert.equal(view.rights.edit, false);
+  assert.deepEqual(view.versions.map(v => v.revision), [7, 6, 5, 4, 3, 2, 1]);
+});
+
+test('wiki: suggestions, conflicts, diff, rollback and the log', async () => {
+  const owner = await asUser('Модератор предложений'), m = await asUser('Предлагающий'), e = await asUser('Принимающий');
+  const g = await community(owner, m, e);
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { mode: 'suggest' } });
+  // In "suggest", members don't create pages; editors and moderators do.
+  await call('api/wiki', { method: 'POST', cookie: m.cookie, data: { title: 'Нет', body: 'нет', group: g }, status: 403 });
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: owner.cookie, data: { title: 'Статья', body: 'строка 1\nстрока 2', group: g }, status: 201 })).json();
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: e.user.id, role: 'editor', add: true } });
+  await edit(m, id, 1, 'прямо', 403);
+  const s1 = (await (await call('api/wiki/' + id + '/suggest', { method: 'POST', cookie: m.cookie, data: { title: 'Статья', body: 'строка 1\nстрока 2 исправлена', revision: 1 }, status: 201 })).json()).id;
+  const s2 = (await (await call('api/wiki/' + id + '/suggest', { method: 'POST', cookie: m.cookie, data: { title: 'Статья', body: 'другое', revision: 1 }, status: 201 })).json()).id;
+  // The suggester can't accept; an outsider can't even see it.
+  await call('api/wiki/' + id + '/suggestions/' + s1, { method: 'POST', cookie: m.cookie, data: { accept: true }, status: 403 });
+  const outsider = await asUser('Чужой');
+  await call('api/wiki/' + id + '/suggestions/' + s1, { cookie: outsider.cookie, status: 404 });
+  const seen = await (await call('api/wiki/' + id + '/suggestions/' + s1, { cookie: e.cookie })).json();
+  assert.deepEqual(seen.diff.filter(d => d.op !== ' ').map(d => d.op + d.line), ['-строка 2', '+строка 2 исправлена']);
+  const accepted = await (await call('api/wiki/' + id + '/suggestions/' + s1, { method: 'POST', cookie: e.cookie, data: { accept: true } })).json();
+  assert.equal(accepted.revision, 2);
+  const after = await page(e.cookie, id);
+  assert.equal(after.versions[0].author, m.user.id, 'credited to the one who suggested');
+  // The second one was made against revision 1: accepting it would overwrite silently.
+  await call('api/wiki/' + id + '/suggestions/' + s2, { method: 'POST', cookie: e.cookie, data: { accept: true }, status: 409 });
+  await call('api/wiki/' + id + '/suggestions/' + s2, { method: 'POST', cookie: e.cookie, data: { accept: false } });
+  await call('api/wiki/' + id + '/suggestions/' + s2, { method: 'POST', cookie: e.cookie, data: { accept: true }, status: 404 });
+  // Diff between versions; rollback = a new revision with the old text.
+  const diff = await (await call('api/wiki/' + id + '/diff?from=1&to=2', { cookie: m.cookie })).json();
+  assert.equal(diff.diff.length, 3);
+  await call('api/wiki/' + id + '/rollback', { method: 'POST', cookie: m.cookie, data: { revision: 1, current: 2 }, status: 403 });
+  await call('api/wiki/' + id + '/rollback', { method: 'POST', cookie: e.cookie, data: { revision: 1, current: 1 }, status: 409 });
+  const rolled = await (await call('api/wiki/' + id + '/rollback', { method: 'POST', cookie: e.cookie, data: { revision: 1, current: 2 }, status: 201 })).json();
+  assert.equal(rolled.revision, 3);
+  const last = await page(m.cookie, id);
+  assert.equal(last.versions[0].body, 'строка 1\nстрока 2');
+  assert.equal(last.versions.length, 3, 'history keeps every revision');
+  // The log: who did what, newest first.
+  const log = await (await call('api/wiki/' + id + '/log', { cookie: m.cookie })).json();
+  assert.deepEqual(log.map(x => x.action), ['rollback', 'reject', 'accept', 'suggest', 'suggest', 'create']);
+  await call('api/groups/' + g + '/wiki-log', { cookie: m.cookie, status: 403 });
+  assert.ok((await (await call('api/groups/' + g + '/wiki-log', { cookie: owner.cookie })).json()).some(x => x.action === 'group-mode'));
+});
+
+test('wiki: a closed community\'s pages stay inside it; old articles keep working', async () => {
+  const owner = await asUser('Закрытый владелец'), outsider = await asUser('Снаружи');
+  const { id: g } = await (await call('api/groups', { method: 'POST', cookie: owner.cookie, data: { name: 'Тайный круг', closed: true }, status: 201 })).json();
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: owner.cookie, data: { title: 'Внутри', body: 'секрет', group: g }, status: 201 })).json();
+  await call('api/wiki/' + id, { cookie: outsider.cookie, status: 404 });
+  await call('api/wiki/' + id + '/diff?from=1&to=1', { cookie: outsider.cookie, status: 404 });
+  assert.ok(!(await (await call('api/wiki', { cookie: outsider.cookie })).json()).some(x => x.id === id));
+  await call('api/wiki', { method: 'POST', cookie: outsider.cookie, data: { title: 'x', body: 'x', group: g }, status: 403 });
+  // The sample article from before (no community): still open to everyone signed in.
+  const old = await page(outsider.cookie, 'cezeos');
+  assert.equal(old.rights.edit, true);
+  assert.equal(old.page.group, null);
 });
 
 test('bookmarks are private, idempotent, and respect current visibility', async () => {
@@ -118,4 +223,80 @@ test('bookmarks are private, idempotent, and respect current visibility', async 
   await call('api/posts/after-rain/bookmark', { method: 'POST', cookie: b.cookie, data: { active: true } });
   await call('api/posts/after-rain/bookmark', { method: 'POST', cookie: b.cookie, data: { active: false } });
   assert.deepEqual(await list(b), []);
+});
+
+test('wiki: no way around the rights through the API', async () => {
+  const owner = await asUser('Владелец ACL'), ed = await asUser('Бывший редактор'), mod = await asUser('Бывший модератор'), m = await asUser('Участник ACL');
+  const g = await community(owner, ed, mod, m);
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { mode: 'suggest' } });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: ed.user.id, role: 'editor', add: true } });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: mod.user.handle, role: 'moderator', add: true } });
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: owner.cookie, data: { title: 'Статья', body: 'v1', group: g }, status: 201 })).json();
+  const sid = (await (await call('api/wiki/' + id + '/suggest', { method: 'POST', cookie: m.cookie, data: { title: 'Статья', body: 'v2', revision: 1 }, status: 201 })).json()).id;
+  // They leave the community: their roles stop working.
+  for (const who of [ed, mod]) await call('api/groups/' + g + '/join', { method: 'POST', cookie: who.cookie, data: { active: false } });
+  await call('api/wiki/' + id + '/suggestions/' + sid, { method: 'POST', cookie: ed.cookie, data: { accept: true }, status: 403 });
+  await edit(mod, id, 1, 'после выхода', 403);
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: mod.cookie, data: { protected: false }, status: 403 });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: mod.cookie, data: { mode: 'open' }, status: 403 });
+  // A member can't name themselves editor, nor give rights to an outsider.
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: m.cookie, data: { member: m.user.id, role: 'editor', add: true }, status: 403 });
+  const out = await asUser('Посторонний ACL');
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: out.user.id, role: 'editor', add: true }, status: 400 });
+  // Rights of one community don't reach another's pages.
+  const g2 = await community(m);
+  const { id: other } = await (await call('api/wiki', { method: 'POST', cookie: m.cookie, data: { title: 'Чужая', body: 'x', group: g2 }, status: 201 })).json();
+  await call('api/groups/' + g2 + '/wiki', { method: 'POST', cookie: m.cookie, data: { mode: 'closed' } });
+  await edit(owner, other, 1, 'не моё сообщество', 403);
+  await call('api/wiki/' + other + '/settings', { method: 'POST', cookie: owner.cookie, data: { protected: true }, status: 403 });
+  // Bad input: unknown mode, a suggestion of another page, a missing revision.
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: owner.cookie, data: { mode: 'everyone' }, status: 400 });
+  await call('api/wiki/' + other + '/suggestions/' + sid, { cookie: m.cookie, status: 404 });
+  await call('api/wiki/' + id, { method: 'POST', cookie: owner.cookie, data: { title: 'x', body: 'x' }, status: 409 });
+  await call('api/wiki/' + id + '/rollback', { method: 'POST', cookie: owner.cookie, data: { revision: 99, current: 1 }, status: 400 });
+});
+
+test('wiki: simultaneous edits and rollbacks — one wins, none is lost silently', async () => {
+  const owner = await asUser('Одновременный'), a = await asUser('Правка А'), b = await asUser('Правка Б');
+  const g = await community(owner, a, b);
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: owner.cookie, data: { title: 'Гонка', body: 'v1', group: g }, status: 201 })).json();
+  const send = (who, body) => fetch(url + 'api/wiki/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: who.cookie }, body: JSON.stringify({ title: 'Гонка', body, revision: 1 }) }).then(r => r.status);
+  const statuses = await Promise.all([send(a, 'от А'), send(b, 'от Б'), send(owner, 'от владельца'), send(a, 'ещё от А')]);
+  assert.equal(statuses.filter(s => s === 201).length, 1, String(statuses));
+  assert.equal(statuses.filter(s => s === 409).length, 3);
+  const view = await page(a.cookie, id);
+  assert.equal(view.versions.length, 2);
+  // Two rollbacks at once against the same current version: one.
+  const back = who => fetch(url + 'api/wiki/' + id + '/rollback', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: who.cookie }, body: JSON.stringify({ revision: 1, current: 2 }) }).then(r => r.status);
+  const rb = await Promise.all([back(a), back(b)]);
+  assert.deepEqual(rb.sort(), [201, 409]);
+  const after = await page(a.cookie, id);
+  assert.equal(after.versions[0].body, 'v1');
+  assert.equal(after.versions.length, 3);
+});
+
+// Review of #3 (27.11): each of these got around the rights before its fix.
+test('wiki: a protected page, joining again, and a closed community through the API', async () => {
+  const owner = await asUser('Владелец защиты'), ed = await asUser('Редактор защиты'), m = await asUser('Участник защиты');
+  const g = await community(owner, ed, m);
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { mode: 'suggest' } });
+  await call('api/groups/' + g + '/wiki', { method: 'POST', cookie: owner.cookie, data: { member: ed.user.id, role: 'editor', add: true } });
+  const { id } = await (await call('api/wiki', { method: 'POST', cookie: owner.cookie, data: { title: 'Статья', body: 'v1', group: g }, status: 201 })).json();
+  const sid = (await (await call('api/wiki/' + id + '/suggest', { method: 'POST', cookie: m.cookie, data: { title: 'Статья', body: 'v2', revision: 1 }, status: 201 })).json()).id;
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: owner.cookie, data: { protected: true } });
+  // An editor can't change a protected page by accepting an older suggestion.
+  await call('api/wiki/' + id + '/suggestions/' + sid, { method: 'POST', cookie: ed.cookie, data: { accept: true }, status: 403 });
+  assert.equal((await page(owner.cookie, id)).versions[0].body, 'v1');
+  // Leaving ends the role; joining again does not bring it back.
+  await call('api/groups/' + g + '/join', { method: 'POST', cookie: ed.cookie, data: { active: false } });
+  await call('api/groups/' + g + '/join', { method: 'POST', cookie: ed.cookie, data: { active: true } });
+  await call('api/wiki/' + id + '/settings', { method: 'POST', cookie: owner.cookie, data: { protected: false } });
+  await call('api/wiki/' + id + '/suggestions/' + sid, { method: 'POST', cookie: ed.cookie, data: { accept: true }, status: 403 });
+  assert.equal((await (await call('api/groups/' + g + '/wiki', { cookie: owner.cookie })).json()).roles.length, 0);
+  // A closed community's wiki settings stay inside it; a single old version opens.
+  const { id: closed } = await (await call('api/groups', { method: 'POST', cookie: owner.cookie, data: { name: 'Закрытая вики', closed: true }, status: 201 })).json();
+  await call('api/groups/' + closed + '/wiki', { cookie: m.cookie, status: 404 });
+  const one = await (await call('api/wiki/' + id + '/versions/1', { cookie: m.cookie })).json();
+  assert.equal(one.body, 'v1');
+  assert.equal((await (await call('api/wiki/' + id + '/history', { cookie: m.cookie })).json()).more, false);
 });
