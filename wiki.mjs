@@ -80,6 +80,37 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
     SELECT w.id, NULL, w.author, NULL, 0, w.created FROM wiki w WHERE w.revision =
       (SELECT MIN(revision) FROM wiki WHERE id = w.id)`);
 
+  // A role in a community lasts while its holder is a member: roles of
+  // people who left before this rule are dropped once (review of #3).
+  db.exec(`DELETE FROM wiki_roles WHERE scope LIKE 'group:%' AND NOT EXISTS (SELECT 1 FROM memberships m
+      WHERE m.member = wiki_roles.member AND m.group_id = substr(wiki_roles.scope, 7) AND m.status = 'member');
+    DELETE FROM wiki_roles WHERE scope LIKE 'page:%' AND EXISTS (SELECT 1 FROM wiki_pages p
+      WHERE p.id = substr(wiki_roles.scope, 6) AND p.group_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m
+        WHERE m.member = wiki_roles.member AND m.group_id = p.group_id AND m.status = 'member'))`);
+
+  // The wiki does not grow without bound (review of #3).
+  const limit = (name, fallback) => Math.max(1, Number.parseInt(env[name], 10) || fallback);
+  const maxRevisions = limit('CEZEOS_WIKI_MAX_REVISIONS', 2000);
+  const maxPages = limit('CEZEOS_WIKI_MAX_PAGES', 50000);
+  const PAGE_SIZE = 50;
+
+  // Every change — revision, suggestion status, log — is written whole or not
+  // at all, inside the server's transaction or on its own.
+  let depth = 0;
+  function atomic(action) {
+    const name = 'wiki_' + (++depth);
+    db.exec('SAVEPOINT ' + name);
+    try {
+      const result = action();
+      db.exec('RELEASE ' + name);
+      return result;
+    } catch (error) {
+      db.exec('ROLLBACK TO ' + name);
+      db.exec('RELEASE ' + name);
+      throw error;
+    } finally { depth--; }
+  }
+
   const siteModerators = new Set((env.CEZEOS_WIKI_MODERATORS || '').split(',').map(s => s.trim()).filter(Boolean));
   const scopeOf = group => group ? 'group:' + group : 'site';
   const hasRole = (scope, member, role) => Boolean(member && db.prepare(
@@ -125,7 +156,9 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
     } else if (member && moderator) edit = true;
     return {
       read: readable, edit, suggest: suggest && !p.protected,
-      review: Boolean(member) && (moderator || (editor && mode === 'suggest')),
+      // Accepting a suggestion changes the page: on a protected page only a
+      // moderator does it (review: an editor accepted into a protected page).
+      review: Boolean(member) && readable && (moderator || (editor && mode === 'suggest' && !p.protected)),
       moderate: moderator, mode, inherited: !p.mode,
     };
   }
@@ -148,29 +181,61 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
   function write(id, c, member) {
     const last = latest(id);
     const next = (last?.revision || 0) + 1;
+    if (next > maxRevisions) fail(507, 'У статьи слишком много версий. Создайте новую статью.');
     db.prepare('INSERT INTO wiki VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, next, c.title, c.category, c.body, member, Date.now());
     return next;
   }
   function memberOrFail(member) { if (!member) fail(401, 'Войдите, чтобы выполнить это действие.'); return member; }
 
-  return {
+  const api = {
     rights,
     /// Latest revisions the reader may see (of one community, or all).
     list(member, group) {
-      const rows = db.prepare(`SELECT w.*, p.group_id, p.mode, p.protected FROM wiki w JOIN wiki_pages p ON p.id = w.id
+      // What the reader may see is chosen in the query: pages of closed
+      // communities no longer push readable ones out of a fixed window.
+      const rows = db.prepare(`SELECT w.*, p.group_id, p.mode, p.protected, p.author page_author FROM wiki w
+        JOIN wiki_pages p ON p.id = w.id LEFT JOIN groups g ON g.id = p.group_id
         WHERE w.revision = (SELECT MAX(revision) FROM wiki WHERE id = w.id) AND (? IS NULL OR p.group_id = ?)
-        ORDER BY w.created DESC LIMIT 200`).all(group || null, group || null);
-      return rows.filter(row => rights(member, { ...row, author: pageRow(row.id)?.author }).read).slice(0, 60);
+          AND (p.group_id IS NULL OR g.closed = 0 OR g.owner = ? OR EXISTS (SELECT 1 FROM memberships m
+            WHERE m.group_id = p.group_id AND m.member = ? AND m.status = 'member'))
+        ORDER BY w.created DESC LIMIT 60`).all(group || null, group || null, member || '', member || '');
+      return rows.filter(row => rights(member, { ...row, author: row.page_author }).read)
+        .map(({ page_author, ...row }) => row);
     },
     /// A page: its revisions, settings and what the reader may do.
     page(member, id) {
       const { p, r } = needPage(id, member);
-      const versions = db.prepare('SELECT * FROM wiki WHERE id = ? ORDER BY revision DESC').all(id)
-        .map(item => ({ ...item, profile: profile(item.author) }));
+      const { versions, more } = this.history(member, id, {});
       const pending = r.review || member ? db.prepare(`SELECT id, base, title, author, created FROM wiki_suggestions
         WHERE page = ? AND status = 'pending' AND (? OR author = ?) ORDER BY created`).all(id, r.review ? 1 : 0, member || '')
         .map(s => ({ ...s, profile: profile(s.author) })) : [];
-      return { page: { id: p.id, group: p.group_id, author: p.author, mode: p.mode, protected: Boolean(p.protected) }, rights: r, versions, suggestions: pending };
+      return { page: { id: p.id, group: p.group_id, author: p.author, mode: p.mode, protected: Boolean(p.protected) }, rights: r, versions, more, suggestions: pending };
+    },
+    /// Revisions newest first, PAGE_SIZE at a time, older than `before`.
+    history(member, id, { before } = {}) {
+      needPage(id, member);
+      const upTo = Number.isInteger(before) && before > 0 ? before : Number.MAX_SAFE_INTEGER;
+      const rows = db.prepare('SELECT * FROM wiki WHERE id = ? AND revision < ? ORDER BY revision DESC LIMIT ?')
+        .all(id, upTo, PAGE_SIZE + 1);
+      return { versions: rows.slice(0, PAGE_SIZE).map(item => ({ ...item, profile: profile(item.author) })), more: rows.length > PAGE_SIZE };
+    },
+    version(member, id, revision) {
+      needPage(id, member);
+      const v = db.prepare('SELECT * FROM wiki WHERE id = ? AND revision = ?').get(id, revision);
+      if (!v) fail(404, 'Версия не найдена.');
+      return { ...v, profile: profile(v.author), latest: latest(id).revision };
+    },
+    /// `member` left `group` (or was removed): their roles there end, and
+    /// suggestions still waiting are withdrawn — joining again starts afresh.
+    left(member, group) {
+      if (!member || !group) return;
+      atomic(() => {
+        db.prepare(`DELETE FROM wiki_roles WHERE member = ? AND (scope = ? OR scope IN
+          (SELECT 'page:' || id FROM wiki_pages WHERE group_id = ?))`).run(member, scopeOf(group), group);
+        db.prepare(`UPDATE wiki_suggestions SET status = 'withdrawn', decided = ? WHERE author = ? AND status = 'pending'
+          AND page IN (SELECT id FROM wiki_pages WHERE group_id = ?)`).run(Date.now(), member, group);
+        log(null, group, member, 'left');
+      });
     },
     create(member, input) {
       memberOrFail(member);
@@ -182,6 +247,7 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
       const mayCreate = r.read && (r.moderate || (standing(member, group).inCommunity && (r.mode === 'open' || r.mode === 'closed' || r.edit)));
       if (!mayCreate) fail(403, 'В этом сообществе статьи создают редакторы и модераторы.');
       const c = content(input);
+      if (db.prepare('SELECT count(*) n FROM wiki_pages').get().n >= maxPages) fail(507, 'В вики слишком много статей.');
       const id = randomUUID();
       db.prepare('INSERT INTO wiki_pages (id, group_id, author, mode, protected, created) VALUES (?, ?, ?, NULL, 0, ?)').run(id, group, member, Date.now());
       const revision = write(id, c, member);
@@ -233,6 +299,9 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
       if (accept) {
         // Made against an older text: the editor looks again (no silent overwrite).
         if (s.base !== latest(id).revision) fail(409, 'Статья изменилась после предложения. Сравните и предложите заново.');
+        // Its author must still be able to take part (review: suggestions of
+        // people who left were accepted under their name).
+        if (!standing(s.author, p.group_id || null).inCommunity) fail(409, 'Автор предложения больше не участник сообщества.');
         revision = write(id, s, s.author);
       }
       db.prepare('UPDATE wiki_suggestions SET status = ?, decided_by = ?, decided = ?, revision = ? WHERE id = ?')
@@ -304,6 +373,8 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
       const g = getGroup(group);
       if (!g) fail(404, 'Сообщество не найдено.');
       const { moderator, inCommunity } = standing(member, group);
+      // A closed community shows nothing of itself to outsiders.
+      if (g.closed && !inCommunity && !moderator) fail(404, 'Сообщество не найдено.');
       const roles = db.prepare('SELECT member, role FROM wiki_roles WHERE scope = ? ORDER BY role, member').all(scopeOf(group))
         .map(x => ({ ...x, profile: profile(x.member) }));
       return { group, mode: groupMode(group), moderator, member: inCommunity, roles: moderator ? roles : roles.filter(x => x.role === 'moderator') };
@@ -320,4 +391,9 @@ export function createWiki(db, { getGroup, membership, profile, env = process.en
         .map(x => ({ ...x, profile: profile(x.actor) }));
     },
   };
+  for (const name of ['create', 'edit', 'suggest', 'decide', 'rollback', 'settings', 'groupSettings']) {
+    const action = api[name];
+    api[name] = (...args) => atomic(() => action.apply(api, args));
+  }
+  return api;
 }

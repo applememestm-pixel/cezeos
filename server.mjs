@@ -489,7 +489,10 @@ async function api(req, res, url) {
       if (input.active) {
         db.prepare('INSERT OR IGNORE INTO memberships VALUES (?, ?, ?)').run(member, id, group.closed ? 'pending' : 'member');
       } else if (group.owner !== member) {
-        db.prepare('DELETE FROM memberships WHERE member = ? AND group_id = ?').run(member, id);
+        transaction(() => {
+          db.prepare('DELETE FROM memberships WHERE member = ? AND group_id = ?').run(member, id);
+          wiki.left(member, id);
+        });
       }
       return json(res, groupSummary(group, member));
     }
@@ -515,6 +518,8 @@ async function api(req, res, url) {
     if (action === 'suggest' && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.suggest(member, id, input)), 201); }
     if (action === 'suggestions' && sub && method === 'GET') return json(res, wiki.suggestion(member, id, sub));
     if (action === 'suggestions' && sub && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.decide(member, id, sub, input.accept === true))); }
+    if (action === 'history' && method === 'GET') return json(res, wiki.history(member, id, { before: Number(url.searchParams.get('before')) }));
+    if (action === 'versions' && sub && method === 'GET') return json(res, wiki.version(member, id, Number(sub)));
     if (action === 'diff' && method === 'GET') return json(res, wiki.diff(member, id, Number(url.searchParams.get('from')), Number(url.searchParams.get('to'))));
     if (action === 'rollback' && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.rollback(member, id, input)), 201); }
     if (action === 'settings' && method === 'POST') { const input = await payload(req); return json(res, transaction(() => wiki.settings(member, id, input))); }

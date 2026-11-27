@@ -375,7 +375,7 @@ async function loadComments(id){
     (state.me?'<form class="comment-form" data-post="'+escape(id)+'"><input name="body" aria-label="Комментарий" maxlength="1000" placeholder="Написать комментарий" required><button type="submit" class="btn">Отправить</button></form>':btn('account','Войдите, чтобы ответить'));
   target.hidden=false;
 }
-const WIKI_ACTIONS={create:'создал(а)',edit:'правка',suggest:'предложение',accept:'принято',reject:'отклонено',rollback:'откат',mode:'режим',
+const WIKI_ACTIONS={create:'создал(а)',left:'вышел(а) из сообщества',edit:'правка',suggest:'предложение',accept:'принято',reject:'отклонено',rollback:'откат',mode:'режим',
   protect:'защита',unprotect:'защита снята','group-mode':'режим сообщества','grant-editor':'дан редактор','revoke-editor':'снят редактор','grant-moderator':'дан модератор','revoke-moderator':'снят модератор'};
 const WIKI_MODES={open:'открытая',trusted:'доверенные редакторы',closed:'автор и модераторы',suggest:'через предложения'};
 function wikiCatalog(entries){
@@ -429,12 +429,14 @@ async function perform(key,data){
       return open('Ссылка на публикацию',field('url','Ссылка','readonly',url));
     }
     case 'wiki-history': {
-      const {versions}=await api('wiki/'+id);
-      const latest=versions[0].revision;
+      // The history comes in pages of 50, newest first (data-key: older than).
+      const [{versions:top},{versions,more}]=await Promise.all([api('wiki/'+id),api('wiki/'+id+'/history?'+params({before:data.key||''}))]);
+      const latest=top[0].revision;
+      const older=more?btn('wiki-history','Показать более ранние',{data:idAttr(data.id)+' data-key="'+versions.at(-1).revision+'"'}):'';
       return open('История статьи',stack(versions.map(version=>row(
         '<span>Версия '+version.revision+' · '+escape(version.profile?.name||'')+' · '+time(version.created)+'</span>'+
         btn('wiki-version','Открыть',{data:idAttr(data.id)+' data-key="'+version.revision+'"'})+
-        (version.revision===latest?'':btn('wiki-diff','Сравнить с текущей',{data:idAttr(data.id)+' data-key="'+version.revision+'" data-to="'+latest+'"'})))).join('')));
+        (version.revision===latest?'':btn('wiki-diff','Сравнить с текущей',{data:idAttr(data.id)+' data-key="'+version.revision+'" data-to="'+latest+'"'})))).join('')+row(older)));
     }
     case 'wiki-diff': {
       const d=await api('wiki/'+id+'/diff?'+params({from:data.key,to:data.to}));
@@ -485,11 +487,8 @@ async function perform(key,data){
       dialog.close();
       return render();
     case 'wiki-version': {
-      const view=await api('wiki/'+id);
-      const versions=view.versions;
-      const version=versions.find(item=>item.revision===Number(data.key));
-      if(!version) return;
-      const restore=version===versions[0]||!view.rights.edit?'':btn('wiki-rollback','Откатить к этой версии',{data:idAttr(data.id)+' data-key="'+version.revision+'" data-to="'+versions[0].revision+'"'});
+      const [view,version]=await Promise.all([api('wiki/'+id),api('wiki/'+id+'/versions/'+uri(data.key))]);
+      const restore=version.revision===version.latest||!view.rights.edit?'':btn('wiki-rollback','Откатить к этой версии',{data:idAttr(data.id)+' data-key="'+version.revision+'" data-to="'+version.latest+'"'});
       return open('Версия '+version.revision,stack('<h3>'+escape(version.title)+'</h3><p class="preline">'+escape(version.body)+'</p>'+row(restore)));
     }
   }
@@ -589,7 +588,7 @@ async function perform(key,data){
     case 'wiki-edit': {
       if(!id) return editWiki(null,0,{group:data.group||''});
       const {versions}=await api('wiki/'+id);
-      const entry=data.key?versions.find(item=>item.revision===Number(data.key)):versions[0];
+      const entry=data.key?await api('wiki/'+id+'/versions/'+uri(data.key)):versions[0];
       if(entry) return editWiki(entry,versions[0].revision,{suggest:data.suggest==='1'});
       return;
     }
